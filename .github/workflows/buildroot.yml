@@ -1,0 +1,98 @@
+name: Buildroot
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  push:
+    branches:
+      - "main"
+  
+jobs:
+  build:
+    name: Download and build
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        release:
+          - 2021.02.5
+          - 2021.08
+        architecture:
+          - x86_64
+        clib:
+          - glibc
+          - musl
+          - uclibc
+    steps:
+      - name: Cache buildroot files
+        uses: actions/cache@v2
+        with:
+          path: |
+            ${{ github.workspace }}/buildroots/${{ matrix.release }}
+          key: buildroot-${{ matrix.release }}
+
+      - name: Cache buildroot outputs
+        uses: actions/cache@v2
+        with:
+          path: |
+            ${{ github.workspace }}/ccache
+            ${{ github.workspace }}/dl
+            ${{ github.workspace }}/host
+          key: buildroot-${{ matrix.release }}-${{ matrix.architecture }}-${{ matrix.clib }}
+        
+      - name: Check to see if the current release is already cached
+        id: already-cached
+        continue-on-error: true
+        run: |
+          [ -d "${{ github.workspace }}/buildroots" ] || exit 1
+          [ -e "${{ github.workspace }}/buildroots/manifest.txt" ] || exit 1
+          (cat ${{ github.workspace }}/buildroots/manifest.txt | grep ${{ matrix.release }}) || exit 1
+          [ -d "${{ github.workspace }}/buildroots/${{ matrix.release }}" ] || exit 1
+          exit 0
+
+      - name: Checkout
+        uses: actions/checkout@v2
+        if: ${{ steps.already-cached.outcome == 'failure' }}
+
+      - name: Run checks
+        run: ./verify_buildroot_org_certificate.sh
+        if: ${{ steps.already-cached.outcome == 'failure' }}
+
+      - name: Download buildroot tarball and signature
+        if: ${{ steps.already-cached.outcome == 'failure' }}
+        run: |
+          curl https://www.buildroot.org/downloads/buildroot-${{ matrix.release }}.tar.gz > ${{ github.workspace }}/buildroot-${{ matrix.release }}.tar.gz
+          curl https://www.buildroot.org/downloads/buildroot-${{ matrix.release }}.tar.gz.sign > ${{ github.workspace }}/buildroot-${{ matrix.release }}.tar.gz.sign
+
+      - name: Verify SHA1
+        if: ${{ steps.already-cached.outcome == 'failure' }}
+        run: |
+          cat ${{ github.workspace }}/buildroot-${{ matrix.release }}.tar.gz.sign | sed -n -e 's/^SHA1:\W*//p' | sha1sum --check
+
+      - name: Extract buildroot and move it to the cached dir
+        if: ${{ steps.already-cached.outcome == 'failure' }}
+        run: |
+          tar xzf buildroot-${{ matrix.release }}.tar.gz
+          [ -d "${{ github.workspace }}/buildroots" ] || mkdir ${{ github.workspace }}/buildroots
+          [ -d "${{ github.workspace }}/buildroots/${{ matrix.release }}" ] && rm -r ${{ github.workspace }}/buildroots/${{ matrix.release }}
+          mv buildroot-${{ matrix.release }} ${{ github.workspace }}/buildroots/${{ matrix.release }}
+          echo ${{ matrix.release }} >> ${{ github.workspace }}/buildroots/manifest.txt
+
+      - name: Build SDK
+        run: |
+          make O=${{ github.workspace }}/output -C ${{ github.workspace }}/buildroots/${{ matrix.release }} BR2_EXTERNAL=${{ github.workspace }} BR2_CCACHE=y BR2_CCACHE_DIR=${{ github.workspace }}/ccache BR2_DL_DIR=${{ github.workspace }}/dl BR2_HOST_DIR=${{ github.workspace }}/host alldefconfig
+          make O=${{ github.workspace }}/output -C ${{ github.workspace }}/buildroots/${{ matrix.release }} BR2_EXTERNAL=${{ github.workspace }} BR2_CCACHE=y BR2_CCACHE_DIR=${{ github.workspace }}/ccache BR2_DL_DIR=${{ github.workspace }}/dl BR2_HOST_DIR=${{ github.workspace }}/host defconfig BR2_DEFCONFIG=${{ github.workspace }}/config/toolchain_defconfig
+          make O=${{ github.workspace }}/output -C ${{ github.workspace }}/buildroots/${{ matrix.release }} BR2_EXTERNAL=${{ github.workspace }} BR2_CCACHE=y BR2_CCACHE_DIR=${{ github.workspace }}/ccache BR2_DL_DIR=${{ github.workspace }}/dl BR2_HOST_DIR=${{ github.workspace }}/host defconfig BR2_DEFCONFIG=${{ github.workspace }}/config/c_library/${{ matrix.clib }}_defconfig
+          make O=${{ github.workspace }}/output -C ${{ github.workspace }}/buildroots/${{ matrix.release }} BR2_EXTERNAL=${{ github.workspace }} BR2_CCACHE=y BR2_CCACHE_DIR=${{ github.workspace }}/ccache BR2_DL_DIR=${{ github.workspace }}/dl BR2_HOST_DIR=${{ github.workspace }}/host defconfig BR2_DEFCONFIG=${{ github.workspace }}/config/arch/${{ matrix.architecture }}_defconfig
+          make O=${{ github.workspace }}/output -C ${{ github.workspace }}/buildroots/${{ matrix.release }} BR2_EXTERNAL=${{ github.workspace }} BR2_CCACHE=y BR2_CCACHE_DIR=${{ github.workspace }}/ccache BR2_DL_DIR=${{ github.workspace }}/dl BR2_HOST_DIR=${{ github.workspace }}/host sdk
+      
+      - name: Show contents of output
+        run: |
+          ls ${{ github.workspace }}/output/images/
+      
+      - name: Upload toolchain
+        uses: actions/upload-artifact@v2
+        with:
+          name: toolchain-br${{ matrix.release }}-${{ matrix.architecture }}-${{ matrix.clib }}
+          path: ${{ github.workspace }}/output/images/*.tar.gz
